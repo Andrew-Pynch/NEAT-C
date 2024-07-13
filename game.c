@@ -10,11 +10,20 @@
 #include <GLFW/glfw3.h>
 #include <assert.h>
 #include <math.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+void safe_free(void **pp) {
+    if (pp != NULL && *pp != NULL) {
+        // printf("Freeing memory at address: %p\n", *pp);
+        free(*pp);
+        *pp = NULL;
+    }
+}
 
 CellType grid[WIDTH][HEIGHT];
 int current_generation = 0;
@@ -116,78 +125,80 @@ void log_float(float message) {
     }
 }
 
+void set_adjacent_tiles(int x, int y, CellType adjacent_tiles[8]) {
+    /*
+     * =  =  =
+     * = x,y =
+     * =  =  =
+     * */
+    // up left
+    adjacent_tiles[0] = (y < HEIGHT - 1) ? grid[x][y + 1] : EMPTY;
+    // up
+    adjacent_tiles[1] = (y < HEIGHT - 1) ? grid[x][y + 1] : EMPTY;
+    // up right
+    adjacent_tiles[2] = (y < HEIGHT - 1) ? grid[x][y + 1] : EMPTY;
+    // left
+    adjacent_tiles[3] = (x > 0) ? grid[x - 1][y] : EMPTY;
+    // right
+    adjacent_tiles[4] = (x < WIDTH - 1) ? grid[x + 1][y] : EMPTY;
+    // down left
+    adjacent_tiles[5] = (y > 0) ? grid[x][y - 1] : EMPTY;
+    // down
+    adjacent_tiles[6] = (y > 0) ? grid[x][y - 1] : EMPTY;
+    // down right
+    adjacent_tiles[7] = (y > 0) ? grid[x][y - 1] : EMPTY;
+}
+
 Action get_action(Predator *pred) {
     float inputs[NUM_INPUTS];
     float outputs[NUM_OUTPUTS];
 
     // Get information about adjacent tiles
-    CellType adjacent_tiles[4];
-    adjacent_tiles[0] =
-        (pred->y < HEIGHT - 1) ? grid[pred->x][pred->y + 1] : EMPTY; // Up
-    adjacent_tiles[1] =
-        (pred->y > 0) ? grid[pred->x][pred->y - 1] : EMPTY; // Down
-    adjacent_tiles[2] =
-        (pred->x > 0) ? grid[pred->x - 1][pred->y] : EMPTY; // Left
-    adjacent_tiles[3] =
-        (pred->x < WIDTH - 1) ? grid[pred->x + 1][pred->y] : EMPTY; // Right
+    CellType adjacent_tiles[8];
+    set_adjacent_tiles(pred->x, pred->y, adjacent_tiles);
 
     // Set inputs based on adjacent tiles
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         switch (adjacent_tiles[i]) {
         case EMPTY:
-            inputs[i * 3] = 1.0f;
-            inputs[i * 3 + 1] = 0.0f;
-            inputs[i * 3 + 2] = 0.0f;
+            inputs[i] = 0.0f;
             break;
         case FOOD:
-            inputs[i * 3] = 0.0f;
-            inputs[i * 3 + 1] = 1.0f;
-            inputs[i * 3 + 2] = 0.0f;
+            inputs[i] = 0.5f;
             break;
         case PREDATOR:
-            inputs[i * 3] = 0.0f;
-            inputs[i * 3 + 1] = 0.0f;
-            inputs[i * 3 + 2] = 1.0f;
+            inputs[i] = 1.0f;
             break;
         }
     }
 
     // Add predator's current health as an input
-    inputs[12] = (float)pred->health / 2.0f;
+    inputs[8] = (float)pred->health / HEALTH_POINTS;
+
+    // Add predator's current position
+    inputs[9] = (float)pred->x / WIDTH;
+    inputs[10] = (float)pred->y / HEIGHT;
+
+    // Add food eaten and enemies slain
+    inputs[11] =
+        (float)pred->food_eaten / 10.0f; // Normalize assuming max 10 food eaten
+    inputs[12] = (float)pred->enemies_slain /
+                 5.0f; // Normalize assuming max 5 enemies slain
 
     evaluate_network(pred->genome, inputs, outputs);
 
     // Epsilon-greedy exploration
-    if ((float)rand() / RAND_MAX < EPSILON) { // 10% chance of random action
+    if ((float)rand() / RAND_MAX < EPSILON) {
         return rand() % NUM_OUTPUTS;
     }
 
-    // Log all outputs
-    log_string("Network outputs:");
-    for (int i = 0; i < NUM_OUTPUTS; i++) {
-        log_float(outputs[i]);
-    }
-
-    // Use softmax to convert outputs to probabilities
-    float sum_exp = 0.0f;
-    for (int i = 0; i < NUM_OUTPUTS; i++) {
-        outputs[i] = expf(outputs[i]);
-        sum_exp += outputs[i];
-    }
-    for (int i = 0; i < NUM_OUTPUTS; i++) {
-        outputs[i] /= sum_exp;
-    }
-
-    // Choose action based on highest probability
+    // Choose action based on highest output
     int max_index = 0;
     for (int i = 1; i < NUM_OUTPUTS; i++) {
         if (outputs[i] > outputs[max_index]) {
             max_index = i;
         }
     }
-
-    log_string("Chosen action:");
-    log_int(max_index);
 
     return (Action)max_index;
 }
@@ -310,7 +321,7 @@ void evaluate_fitness(Population *pop) {
 
         // Proximity-based food score
         int nearest_food_distance = find_nearest_food(pred->x, pred->y);
-        float proximity_score = 100.0f / (nearest_food_distance + 1);
+        float proximity_score = 100.0f / (nearest_food_distance + 1) * 1.5f;
 
         // Penalize constant upward movement
         float up_movement_penalty = 0.0f;
@@ -438,7 +449,7 @@ void clear_species(Population *pop) {
         Species *species = &pop->species[s];
         if (species->population_size > 0) {
             Genome representative = species->genomes[0];
-            free(species->genomes);
+            safe_free((void **)&species->genomes);
             species->genomes = malloc(sizeof(Genome));
             species->genomes[0] = representative;
             species->population_size = 1;
@@ -451,9 +462,9 @@ void clear_species(Population *pop) {
 void speciate(Population *pop) {
     // Free existing species before reallocating
     for (int s = 0; s < pop->num_species; s++) {
-        free(pop->species[s].genomes);
+        safe_free((void **)&pop->species[s].genomes);
     }
-    free(pop->species);
+    safe_free((void **)&pop->species);
     pop->num_species = 0;
     pop->species = NULL;
 
@@ -485,7 +496,8 @@ void speciate(Population *pop) {
                 species->genomes =
                     realloc(species->genomes,
                             sizeof(Genome) * species->population_size);
-                species->genomes[species->population_size - 1] = *genome;
+                species->genomes[species->population_size - 1] =
+                    *genome; // Shallow copy
                 found_species = true;
                 break;
             }
@@ -498,12 +510,12 @@ void speciate(Population *pop) {
                 realloc(pop->species, sizeof(Species) * pop->num_species);
             Species *new_species = &pop->species[pop->num_species - 1];
             new_species->genomes = malloc(sizeof(Genome));
-            new_species->genomes[0] = *genome;
+            new_species->genomes[0] = *genome; // Shallow copy
             new_species->population_size = 1;
         }
     }
 
-    free(all_genomes);
+    safe_free((void **)&all_genomes);
 }
 
 Genome *crossover(Genome *parent1, Genome *parent2) {
@@ -600,9 +612,9 @@ Genome *crossover(Genome *parent1, Genome *parent2) {
     log_string("Checking if child has any valid connections");
     if (child->num_connections == 0) {
         // No valid connections, cleanup and return NULL
-        free(child->nodes);
-        free(child->connections);
-        free(child);
+        safe_free((void **)&child->nodes);
+        safe_free((void **)&child->connections);
+        safe_free((void **)&child);
         return NULL;
     }
 
@@ -735,12 +747,15 @@ void reproduce(Population *pop) {
 
     log_string("Replacing old population with new population");
     // Replace old population with new population
+    printf("Freeing old population (num_predators: %d)\n", pop->num_predators);
     for (int i = 0; i < pop->num_predators; i++) {
-        free(pop->predators[i].genome->nodes);
-        free(pop->predators[i].genome->connections);
-        free(pop->predators[i].genome);
+        safe_free((void **)&pop->predators[i].genome->nodes);
+        safe_free((void **)&pop->predators[i].genome->connections);
+        safe_free((void **)&pop->predators[i].genome);
     }
-    free(pop->predators);
+    safe_free((void **)&pop->predators);
+    printf("Old population freed\n");
+
     pop->predators = new_population;
     pop->num_predators = INITIAL_POPULATION_SIZE;
 
@@ -772,20 +787,18 @@ Connection *find_connection_by_innovation(Genome *genome,
 
 void cleanup_population(Population *pop) {
     for (int i = 0; i < pop->num_predators; i++) {
-        free(pop->predators[i].genome->nodes);
-        free(pop->predators[i].genome->connections);
-        free(pop->predators[i].genome);
+        safe_free((void **)&pop->predators[i].genome->nodes);
+        safe_free((void **)&pop->predators[i].genome->connections);
+        safe_free((void **)&pop->predators[i].genome);
     }
-    free(pop->predators);
+    safe_free((void **)&pop->predators);
 
     for (int s = 0; s < pop->num_species; s++) {
-        for (int g = 0; g < pop->species[s].population_size; g++) {
-            free(pop->species[s].genomes[g].nodes);
-            free(pop->species[s].genomes[g].connections);
-        }
-        free(pop->species[s].genomes);
+        // We don't need to free individual genomes in species, as they are
+        // shallow copies
+        safe_free((void **)&pop->species[s].genomes);
     }
-    free(pop->species);
+    safe_free((void **)&pop->species);
 }
 
 void cleanup_opengl(GLFWwindow *window) {
@@ -990,10 +1003,15 @@ void update_grid(Population *pop) {
         Action action = get_action(pred);
 
         switch (action) {
+        case MOVE_UP_LEFT:
+            pred->x = (pred->x - 1 + WIDTH) % WIDTH;
+            pred->y = (pred->y - 1 + HEIGHT) % HEIGHT;
+            break;
         case MOVE_UP:
             pred->y = (pred->y + 1) % HEIGHT;
             break;
-        case MOVE_DOWN:
+        case MOVE_UP_RIGHT:
+            pred->x = (pred->x + 1) % WIDTH;
             pred->y = (pred->y - 1 + HEIGHT) % HEIGHT;
             break;
         case MOVE_LEFT:
@@ -1001,6 +1019,17 @@ void update_grid(Population *pop) {
             break;
         case MOVE_RIGHT:
             pred->x = (pred->x + 1) % WIDTH;
+            break;
+        case MOVE_DOWN_LEFT:
+            pred->x = (pred->x - 1 + WIDTH) % WIDTH;
+            pred->y = (pred->y + 1) % HEIGHT;
+            break;
+        case MOVE_DOWN:
+            pred->y = (pred->y - 1 + HEIGHT) % HEIGHT;
+            break;
+        case MOVE_DOWN_RIGHT:
+            pred->x = (pred->x + 1) % WIDTH;
+            pred->y = (pred->y + 1) % HEIGHT;
             break;
         case STAY:
             break;
@@ -1168,7 +1197,7 @@ void evaluate_network(Genome *genome, float *inputs, float *outputs) {
         log_float(outputs[i]);
     }
 
-    free(node_values);
+    safe_free((void **)&node_values);
 }
 
 void simulation(Population *pop, bool render, bool force_render) {
@@ -1200,7 +1229,6 @@ void simulation(Population *pop, bool render, bool force_render) {
     current_generation = 0;
     while (current_generation < MAX_GENERATIONS &&
            (!render || !glfwWindowShouldClose(window))) {
-
         // Print population statistics at the start of each generation
         print_population_stats(pop);
 
@@ -1224,7 +1252,6 @@ void simulation(Population *pop, bool render, bool force_render) {
         // Pause every 10 generations to let the simulation play out
         if (current_generation % VISUALIZE_EVERY_GENERATION == 0 ||
             current_generation == 0 && current_generation > 0) {
-            printf("Pausing evolution to observe current population...\n");
             for (int i = 0; i < 200; i++) {
                 // Run for 200 steps without evolving
                 update_grid(pop);
@@ -1233,7 +1260,6 @@ void simulation(Population *pop, bool render, bool force_render) {
                 }
                 usleep(50000);
             }
-            printf("Resuming evolution...\n");
         }
 
         log_string("Speciating population");
@@ -1299,7 +1325,13 @@ void print_population_stats(Population *pop) {
     printf("  Number of Species: %d\n", pop->num_species);
 }
 
+void segfault_handler(int signum) {
+    printf("Segfault handler called with signal %d\n", signum);
+    exit(EXIT_FAILURE);
+}
+
 int main(void) {
+    signal(SIGSEGV, segfault_handler);
     log_string("Starting program");
 
     Population pop;

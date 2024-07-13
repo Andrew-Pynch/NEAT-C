@@ -14,7 +14,7 @@
 #define HEIGHT 128
 #define CELL_SIZE 5
 #define MAX_DISTANCE (WIDTH + HEIGHT)
-#define NUM_FOOD 10
+#define NUM_FOOD 100
 #define INITIAL_POPULATION_SIZE 20
 #define HEALTH_POINTS 100.0f
 #define HEALTH_RESTORED_PER_FOOD 10.0f
@@ -25,8 +25,9 @@
 // info
 #define EPSILON 0.1
 #define NUM_INPUTS 13
-#define NUM_OUTPUTS 5 // move direction
-#define MAX_GENERATIONS 500
+#define NUM_OUTPUTS                                                            \
+    9 // Up, Down, Left, Right, Up-Left, Up-Right, Down-Left, Down-Right, Stay
+#define MAX_GENERATIONS 1
 
 #define C1 1.0 // excess genes coef
 #define C2 1.0 // disjoint genes coef
@@ -43,7 +44,17 @@
 #define GRID_MEMORY_SIZE 10 // number of last positions to remember
 
 typedef enum { EMPTY, PREDATOR, FOOD } CellType;
-typedef enum { MOVE_UP, MOVE_DOWN, MOVE_LEFT, MOVE_RIGHT, STAY } Action;
+typedef enum {
+    MOVE_UP,
+    MOVE_DOWN,
+    MOVE_LEFT,
+    MOVE_RIGHT,
+    MOVE_UP_LEFT,
+    MOVE_UP_RIGHT,
+    MOVE_DOWN_LEFT,
+    MOVE_DOWN_RIGHT,
+    STAY
+} Action;
 
 typedef struct {
     int from_node;
@@ -101,6 +112,7 @@ int distance(int x1, int y1, int x2, int y2);
 int find_nearest_food(int x, int y);
 void log_string(char *message);
 void log_int(int message);
+void set_adjacent_tiles(int x, int y, CellType adjacent_tiles[8]);
 Action get_action(Predator *predator);
 void initialize_population(Population *pop, int pop_size);
 void evaluate_fitness(Population *pop);
