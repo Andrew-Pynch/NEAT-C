@@ -6,6 +6,8 @@
  * compete for natural resources in an evolving environment.
  */
 #include "game.h"
+#include "common.h"
+#include "renderer.h"
 
 #include <GLFW/glfw3.h>
 #include <assert.h>
@@ -29,16 +31,6 @@ CellType grid[WIDTH][HEIGHT];
 int current_generation = 0;
 int current_game_step = 0;
 
-void error_callback(int error, const char *description) {
-    fprintf(stderr, "Error: %s\n", description);
-}
-
-void key_callback(GLFWwindow *window, int key, int scancode, int action,
-                  int mods) {
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
-}
-
 void init_grid() {
     for (int x = 0; x < WIDTH; x++) {
         for (int y = 0; y < HEIGHT; y++) {
@@ -55,33 +47,6 @@ void init_food() {
         if (grid[food_x][food_y] == EMPTY) {
             set_cell(food_x, food_y, FOOD);
             food_placed++;
-        }
-    }
-}
-
-void draw_grid() {
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    for (int x = 0; x < WIDTH; x++) {
-        for (int y = 0; y < HEIGHT; y++) {
-            switch (grid[x][y]) {
-            case EMPTY:
-                glColor3f(0.0f, 0.0f, 0.0f); // Black
-                break;
-            case PREDATOR:
-                glColor3f(1.0f, 0.0f, 0.0f); // Red
-                break;
-            case FOOD:
-                glColor3f(0.0f, 1.0f, 0.0f); // Green
-                break;
-            }
-
-            glBegin(GL_QUADS);
-            glVertex2f(x * CELL_SIZE, y * CELL_SIZE);
-            glVertex2f((x + 1) * CELL_SIZE, y * CELL_SIZE);
-            glVertex2f((x + 1) * CELL_SIZE, (y + 1) * CELL_SIZE);
-            glVertex2f(x * CELL_SIZE, (y + 1) * CELL_SIZE);
-            glEnd();
         }
     }
 }
@@ -224,6 +189,7 @@ void initialize_population(Population *pop, int pop_size) {
         pred->food_eaten = 0;
         pred->enemies_slain = 0;
         pred->genome = malloc(sizeof(Genome));
+        pred->cell_size = DEFAULT_CELL_SIZE;
 
         log_string("Initializing genome for predator");
         log_int(i);
@@ -278,9 +244,11 @@ void initialize_population(Population *pop, int pop_size) {
 void evaluate_fitness(Population *pop) {
     for (int i = 0; i < pop->num_predators; i++) {
         Predator *pred = &pop->predators[i];
-        float food_score = pred->food_eaten * 10.0f;
+
+        float food_multiplier = 1.0f + (pred->food_eaten * 0.5f);
+        float food_score = pred->food_eaten * 100.0f * food_multiplier;
         float health_score = pred->health;
-        float combat_score = pred->enemies_slain * 20.0f;
+        float combat_score = pred->enemies_slain * 2.0f;
 
         // New scoring components
         float exploration_score = 0.0f;
@@ -715,6 +683,7 @@ void reproduce(Population *pop) {
             new_pred->health = 100.0f;
             new_pred->food_eaten = 0;
             new_pred->enemies_slain = 0;
+            new_pred->cell_size = DEFAULT_CELL_SIZE;
 
             if (species->population_size == 1 || rand() % 100 < 25) {
                 // Asexual reproduction (clone and mutate)
@@ -747,14 +716,12 @@ void reproduce(Population *pop) {
 
     log_string("Replacing old population with new population");
     // Replace old population with new population
-    printf("Freeing old population (num_predators: %d)\n", pop->num_predators);
     for (int i = 0; i < pop->num_predators; i++) {
         safe_free((void **)&pop->predators[i].genome->nodes);
         safe_free((void **)&pop->predators[i].genome->connections);
         safe_free((void **)&pop->predators[i].genome);
     }
     safe_free((void **)&pop->predators);
-    printf("Old population freed\n");
 
     pop->predators = new_population;
     pop->num_predators = INITIAL_POPULATION_SIZE;
@@ -799,11 +766,6 @@ void cleanup_population(Population *pop) {
         safe_free((void **)&pop->species[s].genomes);
     }
     safe_free((void **)&pop->species);
-}
-
-void cleanup_opengl(GLFWwindow *window) {
-    glfwDestroyWindow(window);
-    glfwTerminate();
 }
 
 void add_connection_to_child(Genome *child, Connection *connection) {
@@ -983,6 +945,11 @@ void mutate(Genome *genome) {
     log_int(genome->num_connections);
 }
 
+void consume_food(CellType grid[WIDTH][HEIGHT], int x, int y, Predator *pred) {
+    bool is_pred_colliding =
+        check_collision(pred->x, pred->y, pred->cell_size, x, y, CELL_SIZE);
+}
+
 void update_grid(Population *pop) {
     int food_eaten_this_step = 0;
 
@@ -990,6 +957,7 @@ void update_grid(Population *pop) {
     for (int x = 0; x < WIDTH; x++) {
         for (int y = 0; y < HEIGHT; y++) {
             if (grid[x][y] == PREDATOR) {
+                // test
                 grid[x][y] = EMPTY;
             }
         }
@@ -999,6 +967,7 @@ void update_grid(Population *pop) {
         Predator *pred = &pop->predators[i];
         int old_x = pred->x;
         int old_y = pred->y;
+        // test
 
         Action action = get_action(pred);
 
@@ -1035,25 +1004,32 @@ void update_grid(Population *pop) {
             break;
         }
 
-        // Check for food in the current cell and adjacent cells
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
+        // Check for food collisions within MAX_CELL_SIZE range
+        int range = MAX_CELL_SIZE / 2;
+        for (int dx = -range; dx <= range; dx++) {
+            for (int dy = -range; dy <= range; dy++) {
                 int check_x = (pred->x + dx + WIDTH) % WIDTH;
                 int check_y = (pred->y + dy + HEIGHT) % HEIGHT;
                 if (grid[check_x][check_y] == FOOD) {
-                    pred->food_eaten++;
-                    pred->health = fmin(
-                        HEALTH_POINTS, pred->health + HEALTH_RESTORED_PER_FOOD);
-                    grid[check_x][check_y] = EMPTY;
-                    food_eaten_this_step++;
+                    if (check_collision(pred->x, pred->y, pred->cell_size,
+                                        check_x, check_y, DEFAULT_CELL_SIZE)) {
+                        pred->food_eaten++;
+                        pred->health =
+                            fmin(HEALTH_POINTS,
+                                 pred->health + HEALTH_RESTORED_PER_FOOD);
+                        grid[check_x][check_y] = EMPTY;
+                        food_eaten_this_step++;
+                    }
                 }
             }
         }
 
         // Handle collisions with other predators
         for (int j = 0; j < pop->num_predators; j++) {
-            if (i != j && pred->x == pop->predators[j].x &&
-                pred->y == pop->predators[j].y) {
+            if (i != j &&
+                check_collision(pred->x, pred->y, pred->cell_size,
+                                pop->predators[j].x, pop->predators[j].y,
+                                pop->predators[j].cell_size)) {
                 // both predators lose 1 health point from fighting
                 pred->health--;
                 pop->predators[j].health--;
@@ -1067,8 +1043,18 @@ void update_grid(Population *pop) {
             }
         }
 
+        // Update cell size based on food eaten
+        float growth = log2f(pred->food_eaten * GROWTH_FACTOR + 1);
+        pred->cell_size =
+            MIN_CELL_SIZE + (MAX_CELL_SIZE - MIN_CELL_SIZE) *
+                                (growth / log2f(GROWTH_FACTOR * NUM_FOOD + 1));
+
+        // Ensure cell size stays within bounds
+        pred->cell_size =
+            fmaxf(MIN_CELL_SIZE, fminf(MAX_CELL_SIZE, pred->cell_size));
+
         // Decrease health over time (incentivize exploration)
-        pred->health = fmax(0.0f, pred->health - 0.1f);
+        pred->health = fmax(0.0f, pred->health - 0.0001f);
 
         // Set the grid cell
         if (pred->health > 0) {
@@ -1205,22 +1191,11 @@ void simulation(Population *pop, bool render, bool force_render) {
 
     GLFWwindow *window = NULL;
     if (render || force_render) {
-        log_string("Initializing GLFW");
-        glfwSetErrorCallback(error_callback);
-        if (!glfwInit()) {
-            log_string("Failed to initialize GLFW");
-            exit(EXIT_FAILURE);
-        }
-        window = glfwCreateWindow(WIDTH * CELL_SIZE, HEIGHT * CELL_SIZE,
-                                  "NEAT Game", NULL, NULL);
-        if (!window) {
-            log_string("Failed to create GLFW window");
-            glfwTerminate();
-            exit(EXIT_FAILURE);
-        }
-        glfwMakeContextCurrent(window);
-        glfwSetKeyCallback(window, key_callback);
-        log_string("GLFW initialized");
+        log_string("Initializing renderer");
+        init_renderer();
+        window =
+            create_window(WIDTH * CELL_SIZE, HEIGHT * CELL_SIZE, "NEAT Game");
+        log_string("Renderer initialized");
     }
 
     init_grid();
@@ -1228,7 +1203,7 @@ void simulation(Population *pop, bool render, bool force_render) {
 
     current_generation = 0;
     while (current_generation < MAX_GENERATIONS &&
-           (!render || !glfwWindowShouldClose(window))) {
+           (!render || !should_close_window(window))) {
         // Print population statistics at the start of each generation
         print_population_stats(pop);
 
@@ -1240,7 +1215,7 @@ void simulation(Population *pop, bool render, bool force_render) {
             update_grid(pop);
 
             if (render) {
-                render_frame(window);
+                render_frame(window, pop, grid);
             }
 
             usleep(50000); // Sleep for 50ms between steps (adjust as needed)
@@ -1256,7 +1231,7 @@ void simulation(Population *pop, bool render, bool force_render) {
                 // Run for 200 steps without evolving
                 update_grid(pop);
                 if (render || force_render) {
-                    render_frame(window);
+                    render_frame(window, pop, grid);
                 }
                 usleep(50000);
             }
@@ -1273,24 +1248,8 @@ void simulation(Population *pop, bool render, bool force_render) {
     }
 
     if (render || force_render) {
-        cleanup_opengl(window);
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        cleanup_renderer(window);
     }
-}
-
-// Helper function to render a single frame
-void render_frame(GLFWwindow *window) {
-    glViewport(0, 0, WIDTH * CELL_SIZE, HEIGHT * CELL_SIZE);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glOrtho(0, WIDTH * CELL_SIZE, 0, HEIGHT * CELL_SIZE, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-
-    draw_grid();
-
-    glfwSwapBuffers(window);
-    glfwPollEvents();
 }
 
 void print_population_stats(Population *pop) {

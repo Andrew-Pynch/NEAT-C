@@ -1,7 +1,8 @@
 #ifndef NEAT_GAME_H
 #define NEAT_GAME_H
 
-#include <GLFW/glfw3.h>
+#include "common.h"
+
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -10,14 +11,7 @@
 
 #define DEBUG false
 // game params
-#define WIDTH 128
-#define HEIGHT 128
-#define CELL_SIZE 5
 #define MAX_DISTANCE (WIDTH + HEIGHT)
-#define NUM_FOOD 100
-#define INITIAL_POPULATION_SIZE 20
-#define HEALTH_POINTS 100.0f
-#define HEALTH_RESTORED_PER_FOOD 10.0f
 
 // NEAT params
 
@@ -27,7 +21,7 @@
 #define NUM_INPUTS 13
 #define NUM_OUTPUTS                                                            \
     9 // Up, Down, Left, Right, Up-Left, Up-Right, Down-Left, Down-Right, Stay
-#define MAX_GENERATIONS 1
+#define MAX_GENERATIONS 11
 
 #define C1 1.0 // excess genes coef
 #define C2 1.0 // disjoint genes coef
@@ -43,7 +37,6 @@
 #define VISUALIZE_EVERY_GENERATION 5
 #define GRID_MEMORY_SIZE 10 // number of last positions to remember
 
-typedef enum { EMPTY, PREDATOR, FOOD } CellType;
 typedef enum {
     MOVE_UP,
     MOVE_DOWN,
@@ -91,6 +84,7 @@ typedef struct {
     int food_eaten;
     int enemies_slain;
     Genome *genome;
+    int cell_size;
 } Predator;
 
 typedef struct {
@@ -101,12 +95,8 @@ typedef struct {
     int num_predators;
 } Population;
 
-void error_callback(int error, const char *description);
-void key_callback(GLFWwindow *window, int key, int scancode, int action,
-                  int mods);
 void init_grid();
 void init_food();
-void draw_grid();
 void set_cell(int x, int y, CellType type);
 int distance(int x1, int y1, int x2, int y2);
 int find_nearest_food(int x, int y);
@@ -129,11 +119,9 @@ bool is_node_connected(Genome *genome, int from_node, int to_node);
 void add_connection_mutation(Genome *genome);
 void update_grid(Population *pop);
 void simulation(Population *pop, bool render, bool force_render);
-void render_frame(GLFWwindow *window);
 Connection *find_connection_by_innovation(Genome *genome,
                                           int innovation_number);
 void cleanup_population(Population *pop);
-void cleanup_opengl(GLFWwindow *window);
 void add_connection_to_child(Genome *child, Connection *connection);
 float activate(float x);
 void evaluate_network(Genome *genome, float *inputs, float *outputs);
@@ -141,5 +129,7 @@ Genome *clone_genome(Genome *original);
 bool is_valid_node_id(Genome *genome, int node_id);
 void print_population_stats(Population *pop);
 int get_grid_current_food_count();
+
+void consume_food(CellType grid[WIDTH][HEIGHT], int x, int y, Predator *pred);
 
 #endif // NEAT_GAME_H
