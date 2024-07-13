@@ -1,6 +1,50 @@
+/*
+ * NEAT-C
+ * Copyright (c) 2023 Andrew Pynch
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ *
+ * NEAT-C is a C implementation of the NEAT algorithm, a genetic algorithm
+ * inspired by the principles of natural selection and genetic programming.
+ * It is designed to be used in computer games, where the goal is to create
+ * artificial intelligence that can learn and adapt to the game's environment.
+ *
+ * This is a custom environment for the NEAT algorithm, where predators compete
+ * for food. The predators are represented by circles, and the food is
+ * represented by a green square. The goal is to keep the predators from eating
+ * the food, while avoiding collisions with other predators.
+ *
+ * The NEAT algorithm is a genetic algorithm inspired by the principles of
+ * natural selection and genetic programming. It is designed to be used in
+ * computer games, where the goal is to create artificial intelligence that can
+ * learn and adapt to the game's environment.
+ *
+ * The NEAT algorithm is a genetic algorithm inspired by the principles of
+ * natural selection and genetic programming. It is designed to be used in
+ * computer games, where the goal is to create artificial intelligence that can
+ * learn and adapt to the game's environment.
+ */
 #include "game.h"
 
 #include <GLFW/glfw3.h>
+#include <assert.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -9,6 +53,8 @@
 #include <unistd.h>
 
 CellType grid[WIDTH][HEIGHT];
+int current_generation = 0;
+int current_game_step = 0;
 
 void error_callback(int error, const char *description) {
     fprintf(stderr, "Error: %s\n", description);
@@ -24,6 +70,18 @@ void init_grid() {
     for (int x = 0; x < WIDTH; x++) {
         for (int y = 0; y < HEIGHT; y++) {
             grid[x][y] = EMPTY;
+        }
+    }
+}
+
+void init_food() {
+    int food_placed = 0;
+    while (food_placed < NUM_FOOD) {
+        int food_x = rand() % WIDTH;
+        int food_y = rand() % HEIGHT;
+        if (grid[food_x][food_y] == EMPTY) {
+            set_cell(food_x, food_y, FOOD);
+            food_placed++;
         }
     }
 }
@@ -98,9 +156,47 @@ Action get_action(Predator *pred) {
     float inputs[NUM_INPUTS];
     float outputs[NUM_OUTPUTS];
 
-    // ... (existing code for setting inputs)
+    // Get information about adjacent tiles
+    CellType adjacent_tiles[4];
+    adjacent_tiles[0] =
+        (pred->y < HEIGHT - 1) ? grid[pred->x][pred->y + 1] : EMPTY; // Up
+    adjacent_tiles[1] =
+        (pred->y > 0) ? grid[pred->x][pred->y - 1] : EMPTY; // Down
+    adjacent_tiles[2] =
+        (pred->x > 0) ? grid[pred->x - 1][pred->y] : EMPTY; // Left
+    adjacent_tiles[3] =
+        (pred->x < WIDTH - 1) ? grid[pred->x + 1][pred->y] : EMPTY; // Right
+
+    // Set inputs based on adjacent tiles
+    for (int i = 0; i < 4; i++) {
+        switch (adjacent_tiles[i]) {
+        case EMPTY:
+            inputs[i * 3] = 1.0f;
+            inputs[i * 3 + 1] = 0.0f;
+            inputs[i * 3 + 2] = 0.0f;
+            break;
+        case FOOD:
+            inputs[i * 3] = 0.0f;
+            inputs[i * 3 + 1] = 1.0f;
+            inputs[i * 3 + 2] = 0.0f;
+            break;
+        case PREDATOR:
+            inputs[i * 3] = 0.0f;
+            inputs[i * 3 + 1] = 0.0f;
+            inputs[i * 3 + 2] = 1.0f;
+            break;
+        }
+    }
+
+    // Add predator's current health as an input
+    inputs[12] = (float)pred->health / 2.0f;
 
     evaluate_network(pred->genome, inputs, outputs);
+
+    // Epsilon-greedy exploration
+    if ((float)rand() / RAND_MAX < EPSILON) { // 10% chance of random action
+        return rand() % NUM_OUTPUTS;
+    }
 
     // Log all outputs
     log_string("Network outputs:");
@@ -119,11 +215,9 @@ Action get_action(Predator *pred) {
     }
 
     // Choose action based on highest probability
-    float max_output = outputs[0];
     int max_index = 0;
     for (int i = 1; i < NUM_OUTPUTS; i++) {
-        if (outputs[i] > max_output) {
-            max_output = outputs[i];
+        if (outputs[i] > outputs[max_index]) {
             max_index = i;
         }
     }
@@ -151,7 +245,7 @@ void initialize_population(Population *pop, int pop_size) {
         Predator *pred = &pop->predators[i];
         pred->x = rand() % WIDTH;
         pred->y = rand() % HEIGHT;
-        pred->health = 100.0f;
+        pred->health = HEALTH_POINTS;
         pred->food_eaten = 0;
         pred->enemies_slain = 0;
         pred->genome = malloc(sizeof(Genome));
@@ -213,11 +307,58 @@ void evaluate_fitness(Population *pop) {
         float health_score = pred->health;
         float combat_score = pred->enemies_slain * 20.0f;
 
-        int nearest_food_distance = find_nearest_food(pred->x, pred->y);
-        float distance_score = 100.0f / (nearest_food_distance + 1);
+        // New scoring components
+        float exploration_score = 0.0f;
+        float diverse_action_score = 0.0f;
+        float time_alive_score =
+            current_game_step * 0.1f; // Reward for surviving longer
 
-        pred->genome->fitness =
-            food_score + health_score + combat_score + distance_score;
+        // Calculate exploration score
+        static int recent_positions[GRID_MEMORY_SIZE][2] = {0};
+        static int position_index = 0;
+        bool new_position = true;
+        for (int j = 0; j < GRID_MEMORY_SIZE; j++) {
+            if (recent_positions[j][0] == pred->x &&
+                recent_positions[j][1] == pred->y) {
+                new_position = false;
+                break;
+            }
+        }
+        if (new_position) {
+            exploration_score += 5.0f;
+            recent_positions[position_index][0] = pred->x;
+            recent_positions[position_index][1] = pred->y;
+            position_index = (position_index + 1) % GRID_MEMORY_SIZE;
+        }
+
+        // Calculate diverse action score
+        static int action_counts[5] = {0}; // Assuming 5 possible actions
+        Action last_action = get_action(pred);
+        action_counts[last_action]++;
+        float action_entropy = 0.0f;
+        for (int j = 0; j < 5; j++) {
+            if (action_counts[j] > 0) {
+                float p = (float)action_counts[j] / current_game_step;
+                action_entropy -= p * log2f(p);
+            }
+        }
+        diverse_action_score = action_entropy * 10.0f;
+
+        // Proximity-based food score
+        int nearest_food_distance = find_nearest_food(pred->x, pred->y);
+        float proximity_score = 100.0f / (nearest_food_distance + 1);
+
+        // Penalize constant upward movement
+        float up_movement_penalty = 0.0f;
+        if (last_action == MOVE_UP) {
+            up_movement_penalty = -5.0f;
+        }
+
+        // Calculate final fitness
+        pred->genome->fitness = food_score + health_score + combat_score +
+                                exploration_score + diverse_action_score +
+                                time_alive_score + proximity_score +
+                                up_movement_penalty;
     }
 }
 
@@ -866,7 +1007,16 @@ void mutate(Genome *genome) {
 }
 
 void update_grid(Population *pop) {
-    init_grid();
+    int food_eaten_this_step = 0;
+
+    // Clear the grid of predators (but keep food in place)
+    for (int x = 0; x < WIDTH; x++) {
+        for (int y = 0; y < HEIGHT; y++) {
+            if (grid[x][y] == PREDATOR) {
+                grid[x][y] = EMPTY;
+            }
+        }
+    }
 
     for (int i = 0; i < pop->num_predators; i++) {
         Predator *pred = &pop->predators[i];
@@ -892,38 +1042,39 @@ void update_grid(Population *pop) {
             break;
         }
 
-        if (old_x != pred->x || old_y != pred->y) {
-            log_string("Predator moved:");
-            log_int(i);
-            log_string("From:");
-            log_int(old_x);
-            log_int(old_y);
-            log_string("To:");
-            log_int(pred->x);
-            log_int(pred->y);
-        }
-
-        // Handle collisions with food
-        if (grid[pred->x][pred->y] == FOOD) {
-            pred->food_eaten++;
-            pred->health = fmin(100.0f, pred->health + 20.0f);
-            grid[pred->x][pred->y] = EMPTY;
+        // Check for food in the current cell and adjacent cells
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                int check_x = (pred->x + dx + WIDTH) % WIDTH;
+                int check_y = (pred->y + dy + HEIGHT) % HEIGHT;
+                if (grid[check_x][check_y] == FOOD) {
+                    pred->food_eaten++;
+                    pred->health = fmin(
+                        HEALTH_POINTS, pred->health + HEALTH_RESTORED_PER_FOOD);
+                    grid[check_x][check_y] = EMPTY;
+                    food_eaten_this_step++;
+                }
+            }
         }
 
         // Handle collisions with other predators
         for (int j = 0; j < pop->num_predators; j++) {
             if (i != j && pred->x == pop->predators[j].x &&
                 pred->y == pop->predators[j].y) {
-                // Simulate a simple combat system
-                if (pred->health > pop->predators[j].health) {
+                // both predators lose 1 health point from fighting
+                pred->health--;
+                pop->predators[j].health--;
+
+                // If one predator dies, the other gains a kill
+                if (pred->health <= 0 && pop->predators[j].health > 0) {
+                    pop->predators[j].enemies_slain++;
+                } else if (pop->predators[j].health <= 0 && pred->health > 0) {
                     pred->enemies_slain++;
-                    pred->health = fmin(100.0f, pred->health + 10.0f);
-                    pop->predators[j].health = 0; // "Kill" the other predator
                 }
             }
         }
 
-        // Decrease health over time
+        // Decrease health over time (incentivize exploration)
         pred->health = fmax(0.0f, pred->health - 0.1f);
 
         // Set the grid cell
@@ -932,17 +1083,35 @@ void update_grid(Population *pop) {
         }
     }
 
-    // Replenish food
-    int food_placed = 0;
-    while (food_placed < NUM_FOOD) {
-        int food_x = rand() % WIDTH;
-        int food_y = rand() % HEIGHT;
+    // Replenish only the food that was eaten this step
+    if (food_eaten_this_step > 0) {
+        int current_food_count = get_grid_current_food_count();
+        int food_to_place =
+            fmin(food_eaten_this_step, NUM_FOOD - current_food_count);
+        int attempts = 0;
+        while (food_to_place > 0 && attempts < 1000) {
+            int food_x = rand() % WIDTH;
+            int food_y = rand() % HEIGHT;
 
-        if (grid[food_x][food_y] == EMPTY) {
-            set_cell(food_x, food_y, FOOD);
-            food_placed++;
+            if (grid[food_x][food_y] == EMPTY) {
+                set_cell(food_x, food_y, FOOD);
+                food_to_place--;
+            }
+            attempts++;
         }
     }
+}
+
+int get_grid_current_food_count() {
+    int food_count = 0;
+    for (int x = 0; x < WIDTH; x++) {
+        for (int y = 0; y < HEIGHT; y++) {
+            if (grid[x][y] == FOOD) {
+                food_count++;
+            }
+        }
+    }
+    return food_count;
 }
 
 Genome *clone_genome(Genome *original) {
@@ -962,6 +1131,10 @@ Genome *clone_genome(Genome *original) {
     return clone;
 }
 
+bool is_valid_node_id(Genome *genome, int node_id) {
+    return node_id >= 0 && node_id < genome->num_nodes;
+}
+
 float activate(float x) {
     // Avoid division by zero
     if (x < -700.0f)
@@ -973,8 +1146,30 @@ float activate(float x) {
 
 void evaluate_network(Genome *genome, float *inputs, float *outputs) {
     log_string("Evaluating network");
-    float *node_values = calloc(genome->num_nodes, sizeof(float));
+    log_string("Current generation:");
+    log_int(current_generation);
+    log_string("Current game step:");
+    log_int(current_game_step);
 
+    log_string("Genome structure:");
+    log_string("Number of nodes:");
+    log_int(genome->num_nodes);
+    log_string("Number of connections:");
+    log_int(genome->num_connections);
+
+    if (genome == NULL || genome->nodes == NULL ||
+        genome->connections == NULL) {
+        log_string("Error: Invalid genome structure");
+        return;
+    }
+
+    float *node_values = calloc(genome->num_nodes, sizeof(float));
+    if (node_values == NULL) {
+        log_string("Error: Failed to allocate memory for node_values");
+        return;
+    }
+    assert(genome->num_nodes >= NUM_INPUTS + NUM_OUTPUTS);
+    assert(genome->num_connections > 0);
     // set the input values
     for (int i = 0; i < NUM_INPUTS; i++) {
         node_values[i] = inputs[i];
@@ -985,7 +1180,16 @@ void evaluate_network(Genome *genome, float *inputs, float *outputs) {
         float sum = 0.0f;
         for (int j = 0; j < genome->num_connections; j++) {
             Connection *conn = &genome->connections[j];
-            if (conn->enabled && conn->to_node == i) {
+            if (conn->enabled) {
+                if (conn->from_node < 0 ||
+                    conn->from_node >= genome->num_nodes) {
+                    log_string("Error: Invalid from_node in connection");
+                    log_int(conn->from_node);
+                    continue;
+                }
+                if (conn->to_node != i) {
+                    continue;
+                }
                 sum += node_values[conn->from_node] * conn->weight;
             }
         }
@@ -1003,11 +1207,11 @@ void evaluate_network(Genome *genome, float *inputs, float *outputs) {
     free(node_values);
 }
 
-void simulation(Population *pop, bool render) {
+void simulation(Population *pop, bool render, bool force_render) {
     log_string("Starting simulation");
 
     GLFWwindow *window = NULL;
-    if (render) {
+    if (render || force_render) {
         log_string("Initializing GLFW");
         glfwSetErrorCallback(error_callback);
         if (!glfwInit()) {
@@ -1026,27 +1230,25 @@ void simulation(Population *pop, bool render) {
         log_string("GLFW initialized");
     }
 
-    int generation = 0;
-    while (generation < MAX_GENERATIONS &&
+    init_grid();
+    init_food();
+
+    current_generation = 0;
+    while (current_generation < MAX_GENERATIONS &&
            (!render || !glfwWindowShouldClose(window))) {
 
+        // Print population statistics at the start of each generation
+        print_population_stats(pop);
+
         // Run 100 game steps for this generation
-        for (int step = 0; step < 100; step++) {
+        for (current_game_step = 0; current_game_step < 100;
+             current_game_step++) {
             log_string("Updating grid for step");
-            log_int(step);
+            log_int(current_game_step);
             update_grid(pop);
 
             if (render) {
-                glViewport(0, 0, WIDTH * CELL_SIZE, HEIGHT * CELL_SIZE);
-                glMatrixMode(GL_PROJECTION);
-                glLoadIdentity();
-                glOrtho(0, WIDTH * CELL_SIZE, 0, HEIGHT * CELL_SIZE, -1, 1);
-                glMatrixMode(GL_MODELVIEW);
-
-                draw_grid();
-
-                glfwSwapBuffers(window);
-                glfwPollEvents();
+                render_frame(window);
             }
 
             usleep(50000); // Sleep for 50ms between steps (adjust as needed)
@@ -1055,21 +1257,82 @@ void simulation(Population *pop, bool render) {
         log_string("Evaluating fitness");
         evaluate_fitness(pop);
 
+        // Pause every 10 generations to let the simulation play out
+        if (current_generation % VISUALIZE_EVERY_GENERATION == 0 ||
+            current_generation == 0 && current_generation > 0) {
+            printf("Pausing evolution to observe current population...\n");
+            for (int i = 0; i < 200; i++) {
+                // Run for 200 steps without evolving
+                update_grid(pop);
+                if (render || force_render) {
+                    render_frame(window);
+                }
+                usleep(50000);
+            }
+            printf("Resuming evolution...\n");
+        }
+
         log_string("Speciating population");
         speciate(pop);
 
         log_string("Reproducing population");
         reproduce(pop);
 
-        generation++;
-        printf("Generation %d completed\n", generation);
+        current_generation++;
+        printf("Generation %d completed\n", current_generation);
     }
 
-    if (render) {
+    if (render || force_render) {
         cleanup_opengl(window);
         glfwDestroyWindow(window);
         glfwTerminate();
     }
+}
+
+// Helper function to render a single frame
+void render_frame(GLFWwindow *window) {
+    glViewport(0, 0, WIDTH * CELL_SIZE, HEIGHT * CELL_SIZE);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, WIDTH * CELL_SIZE, 0, HEIGHT * CELL_SIZE, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+
+    draw_grid();
+
+    glfwSwapBuffers(window);
+    glfwPollEvents();
+}
+
+void print_population_stats(Population *pop) {
+    float total_fitness = 0.0f;
+    float min_fitness = INFINITY;
+    float max_fitness = -INFINITY;
+    int total_connections = 0;
+    int total_nodes = 0;
+
+    for (int i = 0; i < pop->num_predators; i++) {
+        Genome *genome = pop->predators[i].genome;
+        float fitness = genome->fitness;
+
+        total_fitness += fitness;
+        min_fitness = fminf(min_fitness, fitness);
+        max_fitness = fmaxf(max_fitness, fitness);
+
+        total_connections += genome->num_connections;
+        total_nodes += genome->num_nodes;
+    }
+
+    float avg_fitness = total_fitness / pop->num_predators;
+    float avg_connections = (float)total_connections / pop->num_predators;
+    float avg_nodes = (float)total_nodes / pop->num_predators;
+
+    printf("Generation %d Statistics:\n", current_generation);
+    printf("  Min Fitness: %.2f\n", min_fitness);
+    printf("  Max Fitness: %.2f\n", max_fitness);
+    printf("  Avg Fitness: %.2f\n", avg_fitness);
+    printf("  Avg Connections: %.2f\n", avg_connections);
+    printf("  Avg Nodes: %.2f\n", avg_nodes);
+    printf("  Number of Species: %d\n", pop->num_species);
 }
 
 int main(void) {
@@ -1080,7 +1343,7 @@ int main(void) {
     initialize_population(&pop, INITIAL_POPULATION_SIZE);
 
     log_string("Starting simulation");
-    simulation(&pop, true); // Run simulation with rendering
+    simulation(&pop, DEBUG, true); // Set force_render to true
 
     log_string("Cleaning up population");
     cleanup_population(&pop);
